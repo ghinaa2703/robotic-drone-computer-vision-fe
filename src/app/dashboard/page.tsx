@@ -1,4 +1,4 @@
-import ClientDashboard from "@/component/ClientDoashboard";
+import ClientDashboard from "@/modules/ClientDashboard";
 
 export default function DashboardPage() {
   return <ClientDashboard />;
