@@ -1,18 +1,27 @@
 'use client';
 
 import type React from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react'; 
 import { useRouter } from 'next/navigation';
-import type { MouseEvent, ChangeEvent } from 'react';
+import type { MouseEvent, ChangeEvent } from 'react'; 
 
 const BACKEND_WS_URL = 'ws://localhost:8000/ws/video_stream'; 
+
+interface CVMetadata {
+  person_count: number;
+  density_zones: number[][]; 
+  is_crowd: boolean;
+  is_high_density: boolean;
+  recognized_faces: { name: string; confidence: number }[];
+}
 
 interface FrameData {
   type: 'frame';
   image: string;
   width?: number;
-  height?: number;
+  height?: number; 
   fps_target?: number; 
+  metadata?: CVMetadata;
 }
 interface StatusData {
   type: 'status';
@@ -26,29 +35,27 @@ type WebSocketData = FrameData | StatusData | ErrorData;
 
 export default function ClientDashboard() {
   const router = useRouter();
-
   const [selectedFps, setSelectedFps] = useState<number>(20);
-  const [selectedQuality, setSelectedQuality] = useState<number>(50); 
-  const [selectedResizeFactor, setSelectedResizeFactor] = useState<number>(0.5);
+  const [selectedQuality, setSelectedQuality] = useState<number>(50);
+  const [selectedOutputResizeFactor, setSelectedOutputResizeFactor] = useState<number>(0.5); 
+  const [selectedCvProcessingResize, setSelectedCvProcessingResize] = useState<number>(0.5); 
 
-  // Main stream state
-  const [streamUrl, setStreamUrl] = useState<string>(''); 
+  const [streamUrl, setStreamUrl] = useState<string>('');
   const [processedFrameSrc, setProcessedFrameSrc] = useState<string>('/placeholder.svg');
   const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [isStreaming, setIsStreaming] = useState<boolean>(false); 
+  const [isStreaming, setIsStreaming] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>('Connecting to backend...'); 
   const [connectionStrength, setConnectionStrength] = useState<number>(0); 
   const [sessionStartTime] = useState<Date>(new Date()); 
   
-  // State for actual frame metadata received from backend
   const [actualFrameWidth, setActualFrameWidth] = useState<number | null>(null);
   const [actualFrameHeight, setActualFrameHeight] = useState<number | null>(null);
   const [backendTargetFps, setBackendTargetFps] = useState<number | null>(null);
+  
+  const [cvMetadata, setCvMetadata] = useState<CVMetadata | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
 
-  // --- Effect 1: Get streamUrl from window.location.search ---
-  // This effect runs once when the component mounts in the browser.
   useEffect(() => {
     if (typeof window === 'undefined') {
       return;
@@ -61,22 +68,18 @@ export default function ClientDashboard() {
       const timer = setTimeout(() => router.push('/'), 2000);
       return () => clearTimeout(timer); 
     } else {
-      setStreamUrl(url); 
+      setStreamUrl(url);
     }
-  }, [router]);
+  }, [router]); 
 
-  // --- Effect 2: WebSocket connection and event handling logic ---
-  // This is the core logic for the WebSocket communication.
-  // This effect will re-run and re-establish the WebSocket connection
-  // whenever streamUrl or any of the selected parameters (FPS, Quality, ResizeFactor) change.
-  useEffect(() => {
+  const startOrRestartStream = useCallback(() => {
     if (!streamUrl) {
-      console.log('WS Effect: streamUrl not available, skipping WebSocket init.');
+      console.log('startOrRestartStream: streamUrl not available, cannot start.');
       return;
     }
 
     if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
-      console.log('WS Effect: Detected settings change or re-render, closing existing WebSocket to restart.');
+      console.log('startOrRestartStream: WebSocket already connected or connecting, closing existing to restart.');
       if (wsRef.current.readyState === WebSocket.OPEN) {
           wsRef.current.send(JSON.stringify({ type: 'stop_stream' }));
       }
@@ -87,24 +90,24 @@ export default function ClientDashboard() {
       setIsStreaming(false);
       setProcessedFrameSrc('/placeholder.svg');
       setStatusMessage('Restarting stream with new settings...');
-      // IMPORTANT: After closing, this useEffect will re-run because dependencies (like streamUrl) are stable.
-      // But now wsRef.current is null, allowing the code below to create a new WS.
     }
-    console.log(`WS Effect: Initializing new WebSocket for URL: ${decodeURIComponent(streamUrl)}`);
+
+    console.log(`startOrRestartStream: Initializing new WebSocket for URL: ${decodeURIComponent(streamUrl)}`);
     const ws = new WebSocket(BACKEND_WS_URL);
-    wsRef.current = ws; 
+    wsRef.current = ws;
 
     ws.onopen = () => {
       console.log('WebSocket Connected!');
       setIsConnected(true);
-      setConnectionStrength(100); 
+      setConnectionStrength(100);
       setStatusMessage('Connected. Requesting stream...');
       ws.send(JSON.stringify({ 
         type: 'start_stream', 
-        url: streamUrl,
+        url: streamUrl, 
         fps: selectedFps,
         quality: selectedQuality,
-        resize_factor: selectedResizeFactor
+        resize_factor: selectedOutputResizeFactor, 
+        cv_processing_resize: selectedCvProcessingResize
       }));
     };
 
@@ -118,8 +121,11 @@ export default function ClientDashboard() {
             setActualFrameWidth(data.width);
             setActualFrameHeight(data.height);
           }
-          if (data.fps_target) {
+          if (data.fps_target) { 
             setBackendTargetFps(data.fps_target);
+          }
+          if (data.metadata) {
+            setCvMetadata(data.metadata);
           }
 
           setIsStreaming(prevIsStreaming => {
@@ -134,6 +140,7 @@ export default function ClientDashboard() {
           if (data.message === 'Stream stopped.') {
             setIsStreaming(false);
             setProcessedFrameSrc('/placeholder.svg');
+            setCvMetadata(null);
             console.log('Streaming stopped.');
           }
         } else if (data.type === 'error' && 'message' in data) {
@@ -142,12 +149,14 @@ export default function ClientDashboard() {
           setIsStreaming(false);
           setConnectionStrength(0);
           setProcessedFrameSrc('/placeholder.svg');
+          setCvMetadata(null); 
         }
       } catch (e) {
         console.error('Error parsing WebSocket message:', e);
         setStatusMessage('Error: Corrupted stream data.');
         setIsStreaming(false);
         setProcessedFrameSrc('/placeholder.svg');
+        setCvMetadata(null);
       }
     };
 
@@ -158,6 +167,7 @@ export default function ClientDashboard() {
       setIsStreaming(false);
       setConnectionStrength(0);
       setProcessedFrameSrc('/placeholder.svg');
+      setCvMetadata(null);
     };
 
     ws.onclose = () => {
@@ -167,7 +177,8 @@ export default function ClientDashboard() {
       setConnectionStrength(0);
       setStatusMessage('Disconnected');
       setProcessedFrameSrc('/placeholder.svg');
-      wsRef.current = null; // CRITICAL: Clear the ref to allow a new connection on next effect run
+      setCvMetadata(null);
+      wsRef.current = null;
     };
 
     return () => {
@@ -182,9 +193,15 @@ export default function ClientDashboard() {
       } else {
         console.log(`Cleanup: WebSocket was already ${ws.readyState === WebSocket.CLOSED ? 'closed' : 'in another state'}, no action needed.`);
       }
-      wsRef.current = null; 
+      wsRef.current = null;
     };
-  }, [streamUrl, selectedFps, selectedQuality, selectedResizeFactor]); 
+  }, [streamUrl, selectedFps, selectedQuality, selectedOutputResizeFactor, selectedCvProcessingResize]);
+
+  useEffect(() => {
+    if (streamUrl) {
+      startOrRestartStream();
+    }
+  }, [streamUrl, startOrRestartStream]);
 
   const handleStopStream = (e: MouseEvent<HTMLButtonElement>) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && isStreaming) {
@@ -214,104 +231,40 @@ export default function ClientDashboard() {
   };
 
   const containerStyle: React.CSSProperties = {
-    minHeight: '100vh',
-    backgroundColor: '#0f172a',
-    color: 'white',
-    padding: '24px',
-    fontFamily: 'system-ui, -apple-system, sans-serif',
+    minHeight: '100vh', backgroundColor: '#0f172a', color: 'white', padding: '24px', fontFamily: 'system-ui, -apple-system, sans-serif',
   };
-
   const cardStyle: React.CSSProperties = {
-    backgroundColor: '#1e293b',
-    borderRadius: '12px',
-    padding: '24px',
-    border: '1px solid #334155',
-    marginBottom: '24px',
+    backgroundColor: '#1e293b', borderRadius: '12px', padding: '24px', border: '1px solid #334155', marginBottom: '24px',
   };
-
   const headerStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: '32px',
+    display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '32px',
   };
-
   const titleStyle: React.CSSProperties = {
-    fontSize: '32px',
-    fontWeight: 'bold',
-    color: '#22d3ee',
-    margin: 0,
+    fontSize: '32px', fontWeight: 'bold', color: '#22d3ee', margin: 0,
   };
-
   const buttonStyle: React.CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: '8px',
-    padding: '12px 16px',
-    borderRadius: '8px',
-    border: 'none',
-    cursor: 'pointer',
-    fontSize: '14px',
-    fontWeight: '500',
-    transition: 'all 0.2s',
+    display: 'flex', alignItems: 'center', gap: '8px', padding: '12px 16px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '14px', fontWeight: '500', transition: 'all 0.2s',
   };
-
   const stopButtonStyle: React.CSSProperties = {
-    ...buttonStyle,
-    backgroundColor: isConnected && isStreaming ? '#dc2626' : '#6b7280',
-    color: 'white',
-    opacity: isConnected && isStreaming ? 1 : 0.5,
-    cursor: isConnected && isStreaming ? 'pointer' : 'not-allowed',
+    ...buttonStyle, backgroundColor: isConnected && isStreaming ? '#dc2626' : '#6b7280', color: 'white', opacity: isConnected && isStreaming ? 1 : 0.5, cursor: isConnected && isStreaming ? 'pointer' : 'not-allowed',
   };
-
   const backButtonStyle: React.CSSProperties = {
-    ...buttonStyle,
-    backgroundColor: '#475569',
-    color: 'white',
-    marginLeft: '12px',
+    ...buttonStyle, backgroundColor: '#475569', color: 'white', marginLeft: '12px',
   };
-
   const statsGridStyle: React.CSSProperties = {
-    display: 'grid',
-    gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))',
-    gap: '24px',
-    marginBottom: '32px',
+    display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(250px, 1fr))', gap: '24px', marginBottom: '32px',
   };
-
   const mainGridStyle: React.CSSProperties = {
-    display: 'grid',
-    gridTemplateColumns: '2fr 1fr',
-    gap: '24px',
+    display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '24px',
   };
-
   const videoContainerStyle: React.CSSProperties = {
-    backgroundColor: '#000',
-    borderRadius: '12px',
-    overflow: 'hidden',
-    border: '1px solid #334155',
-    aspectRatio: '16/9',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-    minHeight: '400px',
+    backgroundColor: '#000', borderRadius: '12px', overflow: 'hidden', border: '1px solid #334155', aspectRatio: '16/9', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative', minHeight: '400px',
   };
-
   const statusColor = isStreaming ? '#22c55e' : isConnected ? '#eab308' : '#ef4444';
-
   const selectInputStyle: React.CSSProperties = {
-    width: '100%',
-    padding: '10px',
-    borderRadius: '8px',
-    border: '1px solid #475569',
-    backgroundColor: '#0f172a',
-    color: 'white',
-    fontSize: '14px',
-    appearance: 'none',
+    width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid #475569', backgroundColor: '#0f172a', color: 'white', fontSize: '14px', appearance: 'none',
     backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%2394a3b8' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E")`,
-    backgroundRepeat: 'no-repeat',
-    backgroundPosition: 'right 0.7rem center',
-    backgroundSize: '1.5em 1.5em',
+    backgroundRepeat: 'no-repeat', backgroundPosition: 'right 0.7rem center', backgroundSize: '1.5em 1.5em',
   };
 
   const FlyingDroneLoader = () => (
@@ -565,7 +518,7 @@ export default function ClientDashboard() {
               style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px' }}
             >
               <h2 style={{ fontSize: '20px', fontWeight: '600', margin: 0 }}>📹 Camera Feed</h2>
-              {isStreaming && ( 
+              {isStreaming && (
                 <div
                   style={{
                     display: 'flex',
@@ -648,19 +601,75 @@ export default function ClientDashboard() {
 
         <div>
           <div style={cardStyle}>
+            <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '16px' }}>👁️‍🗨️ CV Analytics</h3>
+            {cvMetadata ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: '#94a3b8' }}>Total Persons:</span>
+                  <span style={{ fontWeight: 'bold', fontSize: '18px', color: '#22d3ee' }}>{cvMetadata.person_count}</span>
+                </div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <span style={{ color: '#94a3b8' }}>Crowd Status:</span>
+                  <span style={{ fontWeight: 'bold', fontSize: '16px', color: cvMetadata.is_high_density ? '#dc2626' : (cvMetadata.is_crowd ? '#eab308' : '#22c55e') }}>
+                    {cvMetadata.is_high_density ? 'HIGH DENSITY' : (cvMetadata.is_crowd ? 'CROWDED' : 'NORMAL')}
+                  </span>
+                </div>
+                {cvMetadata.recognized_faces.length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px', borderTop: '1px solid #334155', paddingTop: '8px' }}>
+                    <span style={{ color: '#94a3b8', fontSize: '14px', marginBottom: '4px' }}>Recognized:</span>
+                    {cvMetadata.recognized_faces.map((face, index) => (
+                      <div key={index} style={{ display: 'flex', justifyContent: 'space-between', fontSize: '14px', color: '#e2e8f0' }}>
+                        <span>• {face.name}</span>
+                        <span>{face.confidence}%</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {cvMetadata.density_zones && cvMetadata.density_zones.length > 0 && cvMetadata.density_zones[0] && cvMetadata.density_zones[0].length > 0 && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', marginTop: '8px', borderTop: '1px solid #334155', paddingTop: '8px' }}>
+                    <span style={{ color: '#94a3b8', fontSize: '14px', marginBottom: '4px' }}>Zone Density (Grid):</span>
+                    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cvMetadata.density_zones[0].length}, 1fr)`, gap: '4px' }}>
+                      {cvMetadata.density_zones.map((row, rIdx) => (
+                        row.map((count, cIdx) => (
+                          <div 
+                            key={`${rIdx}-${cIdx}`} 
+                            style={{ 
+                              backgroundColor: count > (cvMetadata.is_high_density ? 8 : (cvMetadata.is_crowd ? 3 : 0)) ? '#f00' : (count > 0 ? '#ff0' : '#000'), 
+                              color: 'white', 
+                              padding: '4px', 
+                              borderRadius: '4px', 
+                              textAlign: 'center', 
+                              fontSize: '12px',
+                              opacity: count > 0 ? 0.8 : 0.4
+                            }}
+                          >
+                            {count}
+                          </div>
+                        ))
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            ) : (
+              <p style={{ color: '#64748b', textAlign: 'center', fontSize: '14px' }}>Waiting for CV data...</p>
+            )}
+          </div>
+
+          <div style={cardStyle}>
             <h3 style={{ fontSize: '18px', fontWeight: '600', marginBottom: '16px' }}>
               ⚙️ Stream Configuration
             </h3>
 
             <div style={{ marginBottom: '16px' }}>
                 <label style={{ display: 'block', fontSize: '14px', color: '#94a3b8', marginBottom: '8px' }}>
-                    JPEG Quality
+                    JPEG Quality (Output)
                 </label>
                 <select 
                     value={selectedQuality} 
                     onChange={(e: ChangeEvent<HTMLSelectElement>) => setSelectedQuality(parseInt(e.target.value))}
                     style={selectInputStyle}
-                    disabled={!isConnected || !streamUrl}
+                    disabled={!isConnected || !streamUrl} 
                 >
                     <option value={30}>Low (30%)</option>
                     <option value={50}>Medium (50%)</option>
@@ -689,13 +698,30 @@ export default function ClientDashboard() {
 
             <div style={{ marginBottom: '16px' }}>
                 <label style={{ display: 'block', fontSize: '14px', color: '#94a3b8', marginBottom: '8px' }}>
-                    Frame Resolution
+                    Display Resolution (Output)
                 </label>
                 <select 
-                    value={selectedResizeFactor} 
-                    onChange={(e: ChangeEvent<HTMLSelectElement>) => setSelectedResizeFactor(parseFloat(e.target.value))}
+                    value={selectedOutputResizeFactor} 
+                    onChange={(e: ChangeEvent<HTMLSelectElement>) => setSelectedOutputResizeFactor(parseFloat(e.target.value))}
                     style={selectInputStyle}
-                    disabled={!isConnected || !streamUrl}
+                    disabled={!isConnected || !streamUrl} 
+                >
+                    <option value={1.0}>Original (100%)</option>
+                    <option value={0.75}>High (75%)</option>
+                    <option value={0.5}>Medium (50%)</option>
+                    <option value={0.25}>Low (25%)</option>
+                </select>
+            </div>
+
+            <div style={{ marginBottom: '16px' }}>
+                <label style={{ display: 'block', fontSize: '14px', color: '#94a3b8', marginBottom: '8px' }}>
+                    CV Processing Resolution
+                </label>
+                <select 
+                    value={selectedCvProcessingResize} 
+                    onChange={(e: ChangeEvent<HTMLSelectElement>) => setSelectedCvProcessingResize(parseFloat(e.target.value))}
+                    style={selectInputStyle}
+                    disabled={!isConnected || !streamUrl} 
                 >
                     <option value={1.0}>Original (100%)</option>
                     <option value={0.75}>High (75%)</option>
@@ -811,7 +837,7 @@ export default function ClientDashboard() {
             </div>
           </div>
         </div>
-      </div>
+      </div> 
 
       <div
         style={{
